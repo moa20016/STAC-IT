@@ -13,7 +13,7 @@ git clone https://github.com/moa20016/STAC-IT.git
 **Change Directory**
 
 ```shell
-cd CSE-4939/BACKEND
+cd STAC-IT/BACKEND
 ```
 **To launch the project:**
 
