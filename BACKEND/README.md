@@ -8,7 +8,7 @@ This repository contains the code for Backend Files for Stac-It. Follow the step
 
 Open your command prompt or terminal and execute the following command to clone the repository:
 ```shell
-git clone https://github.com/YuzhuoZhang/CSE-4939.git
+git clone https://github.com/moa20016/STAC-IT.git
 ```
 **Change Directory**
 
