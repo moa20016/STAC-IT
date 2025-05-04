@@ -1,4 +1,4 @@
-from huggingface_hub import InferenceClient
+from urllib import response
 from django.shortcuts import render
 import requests
 from rest_framework.decorators import api_view
@@ -8,8 +8,10 @@ import time
 import uuid
 import logging
 import re
+from openai import OpenAI  # Import OpenAI SDK
 
-
+# Initialize OpenAI client with DeepSeek API key
+client = OpenAI(api_key="", base_url="https://api.deepseek.com/")
 
 def generate_response(preference, options):
     response = f"Your preference: **{preference}**\nOptions:\n"
@@ -17,20 +19,28 @@ def generate_response(preference, options):
         response += f"*{option}*\n"
     return response
 
-TICKETMASTER_API_KEY = ""
+TICKETMASTER_API_KEY = "" #Ticketmaster api key
 
 logger = logging.getLogger(__name__)
 
-def get_music_events(query):
-    """Fetch music events from Ticketmaster API based on user query."""
+def get_music_events(query, location=None):
+    """Fetch music events from Ticketmaster API based on user query and location."""
     base_url = "https://app.ticketmaster.com/discovery/v2/events.json"
+    
+    city, state = (location.split(", ") if location else ("Stamford", "CT"))
+
     params = {
         "apikey": TICKETMASTER_API_KEY,
         "keyword": query,
         "classificationName": "Music",
         "sort": "date,asc",
-        "size": 5, 
+        "size": 5,
     }
+
+    if city:
+        params["city"] = city
+    if state:
+        params["stateCode"] = state
 
     try:
         response = requests.get(base_url, params=params)
@@ -39,16 +49,19 @@ def get_music_events(query):
             events = data.get("_embedded", {}).get("events", [])
             if not events:
                 return {"error": "No music events found for your query."}
-            
+
             formatted_events = []
             for event in events:
                 formatted_events.append({
                     "name": event.get("name", "Unknown Event"),
                     "date": event.get("dates", {}).get("start", {}).get("localDate", "Date not available"),
                     "venue": event.get("_embedded", {}).get("venues", [{}])[0].get("name", "Venue not available"),
+                    "location": event.get("_embedded", {}).get("venues", [{}])[0].get("address", {}).get("line1", "Location not available"),
+                    "city": event.get("_embedded", {}).get("venues", [{}])[0].get("city", {}).get("name", "City not available"),
+                    "state": event.get("_embedded", {}).get("venues", [{}])[0].get("state", {}).get("stateCode", "State not available"),
                     "url": event.get("url", "#"),
                 })
-            
+
             return formatted_events
         else:
             logger.error(f"Error fetching events: {response.status_code} - {response.text}")
@@ -61,15 +74,14 @@ def get_music_events(query):
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-client = InferenceClient(api_key="")  # Hugging Face API key
 api_key = ""  # Google Places API key
 
-def get_place_details(place_id):
+def get_place_details(place_id, api_key):
     base_url = "https://maps.googleapis.com/maps/api/place/details/json"
     params = {
         "place_id": place_id,
         "key": api_key,
-        "fields": "name,formatted_address,rating,opening_hours,price_level"
+        "fields": "name,formatted_address,rating,opening_hours,price_level,types" 
     }
     response = requests.get(base_url, params=params)
     if response.status_code == 200:
@@ -79,6 +91,9 @@ def get_place_details(place_id):
         return {}
 
 def google_places_text_search(api_key, query, location=None, radius=None):
+    location1, preferences, budget = parse_user_input(query)
+    limit = 3 * len(preferences) + 3 ##can use limit if you want to limit the number of results returned
+    
     base_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
     params = {
         "query": query,
@@ -86,14 +101,15 @@ def google_places_text_search(api_key, query, location=None, radius=None):
     }
     if location and radius:
         params.update({"location": location, "radius": radius})
+    
     response = requests.get(base_url, params=params)
     if response.status_code == 200:
         results = response.json().get("results", [])
         detailed_results = []
-        for place in results:
+        for place in results:  
             place_id = place.get("place_id")
             if place_id:
-                detailed_place = get_place_details(place_id)
+                detailed_place = get_place_details(place_id, api_key)
                 detailed_results.append(detailed_place)
         return detailed_results
     else:
@@ -103,12 +119,13 @@ def google_places_text_search(api_key, query, location=None, radius=None):
 
 def parse_user_input(user_input):
     """Extracts location, preferences, and budget from user input."""
-    location_match = re.search(r"Location: \s*([^,]+,\s*[A-Z]{2})", user_input)
-    preferences_match = re.search(r"Preferences: \s*([^,]+)", user_input)
-    budget_match = re.search(r"Budget: \s*\$?(\d+)", user_input)
+    location_match = re.search(r"Location:\s*([^,]+,\s*[A-Z]{2})", user_input)
+    preferences_match = re.search(r"Preferences:\s*(.*?)(?:,?\s*Budget:|$)", user_input)
+    budget_match = re.search(r"Budget:\s*\$?(\d+)", user_input)
 
-    location = location_match.group(1) if location_match else None
-    preferences = preferences_match.group(1) if preferences_match else "music"
+    location = location_match.group(1).strip() if location_match else None
+    preferences_str = preferences_match.group(1).strip() if preferences_match else "music"
+    preferences = [pref.strip() for pref in preferences_str.split(",")]
     budget = int(budget_match.group(1)) if budget_match else None
 
     return location, preferences, budget
@@ -116,47 +133,136 @@ def parse_user_input(user_input):
 def generate_planner_response(user_input, request_id, timestamp, temp):
     location, preferences, budget = parse_user_input(user_input)
     places_data = google_places_text_search(api_key, user_input)
-    music_data = get_music_events(preferences)
+    music_data = get_music_events(preferences, location)
 
     if isinstance(places_data, dict) and "error" in places_data:
         return places_data["error"]
 
     prompt = f"""
-    [Request ID: {request_id}]
-    [Timestamp: {timestamp}]
-    Help the user create a simple day plan based on GOOGLE_DATA: {places_data}\n, MUSIC_DATA: {music_data}\n and from user input: {user_input}.
-        Extract their preferences from the user input. For EACH preference, suggest **exactly three high-rated places** 
-        that match their interest, ensuring the places are open during the user's available hours. 
-        Ensure each preference fits within the user's available hours and the location's open hours, 
-        allowing 30 minutes between each preference for transportation. If it is music, prioritize from MUSIC DATA over GOOGLE DATA.
+[Request ID: {request_id}]
+[Timestamp: {timestamp}]
 
-        For each preference in user input, provide:
+Help the user create a sequential day plan based on the following data:
+- GOOGLE_DATA: {places_data}
+- MUSIC_DATA: {music_data}
+- USER_INPUT: '{user_input}'
 
-        <Preference 1>: Label of the preference
-        <Option 1>: Mention the name of the place.
-        <Option 1 Activity Description>: Describe what the user will enjoy at each location, including recommended flavors, dishes, or highlights. Create an experience rather than saying something like "eat at a place".
-        <Option 1 Location>: Add the address of the location.
-        Timing: Mention the start and end time for each stop, ensuring a 30-minute buffer for transportation.
-        Open Hours: List the open hours for each place.
-        and so on for other two options at each preference.
-        Format the output in a warm, conversational tone that feels like local advice for a fun day out, with no technical formatting or code. 
-    """
+### OBJECTIVE ###
+Extract the user's preferences from their input and generate a plan with **non-overlapping, time-ordered activities** that fit within the user's available time window. Add a **30-minute buffer** between activities for transportation. Prioritize MUSIC_DATA for music or live events over GOOGLE_DATA. Ensure the places or events are open during the user's available hours.
+
+### RULES ###
+- Use MUSIC_DATA first for music or live events; fallback to GOOGLE_DATA for everything else.
+- Suggest exactly 3 high-rated options per preference.
+- Ensure NO two preferences or their options overlap in time.
+- Ensure the plan is time-ordered and includes a 30-minute buffer between activities.
+- If the total duration of all preferences (including 30-minute buffers) exceeds the user's available time window, EXTEND the end time slightly to fit the full plan.
+- Respect each place’s open hours.
+
+For each preference, provide the following details in a structured JSON format:
+1. Preference: Label of the preference.
+2. Options: A list of exactly three options, each containing:
+   - Name: The name of the place or event.
+   - Activity Description: A detailed description of what the user will enjoy, including recommended dishes, flavors, or highlights. Create an engaging experience.
+   - Location: The address of the place or event.
+   - Timing: The start and end time for the activity, including a 30-minute buffer for transportation.
+   - Open Hours: The operating hours of the place or event.
+
+Ensure the output is in the following JSON format and **ONLY OUTPUT THE JSON AND NOTHING ELSE**:
+{{
+  "request_id": "{request_id}",
+  "timestamp": "{timestamp}",
+  "preferences": [
+    {{
+      "preference": "Preference 1",
+      "options": [
+        {{
+          "name": "Option 1 Name",
+          "activity_description": "Detailed description of the experience.",
+          "location": "Address of the location.",
+          "timing": {{
+            "start": "Start time with buffer",
+            "end": "End time"
+          }},
+          "open_hours": "Operating hours of the place."
+        }},
+        {{
+          "name": "Option 2 Name",
+          "activity_description": "Detailed description of the experience.",
+          "location": "Address of the location.",
+          "timing": {{
+            "start": "Start time with buffer",
+            "end": "End time"
+          }},
+          "open_hours": "Operating hours of the place."
+        }},
+        {{
+          "name": "Option 3 Name",
+          "activity_description": "Detailed description of the experience.",
+          "location": "Address of the location.",
+          "timing": {{
+            "start": "Start time with buffer",
+            "end": "End time"
+          }},
+          "open_hours": "Operating hours of the place."
+        }}
+      ]
+    }},
+    {{
+      "preference": "Preference 2",
+      "options": [
+        {{
+          "name": "Option 1 Name",
+          "activity_description": "Detailed description of the experience.",
+          "location": "Address of the location.",
+          "timing": {{
+            "start": "Start time with buffer",
+            "end": "End time"
+          }},
+          "open_hours": "Operating hours of the place."
+        }},
+        {{
+          "name": "Option 2 Name",
+          "activity_description": "Detailed description of the experience.",
+          "location": "Address of the location.",
+          "timing": {{
+            "start": "Start time with buffer",
+            "end": "End time"
+          }},
+          "open_hours": "Operating hours of the place."
+        }},
+        {{
+          "name": "Option 3 Name",
+          "activity_description": "Detailed description of the experience.",
+          "location": "Address of the location.",
+          "timing": {{
+            "start": "Start time with buffer",
+            "end": "End time"
+          }},
+          "open_hours": "Operating hours of the place."
+        }}
+      ]
+    }}
+    // Add more preferences as needed
+  ]
+}}
+"""
 
     messages = [{"role": "user", "content": prompt}]
 
-    stream = client.chat.completions.create(
-        model="meta-llama/Meta-Llama-3-70B-Instruct", 
-        messages=messages, 
-        max_tokens=2048,
-        temperature=temp,  # Dynamic temperature parameter
-        stream=True,
+    # Use DeepSeek API instead of Hugging Face
+    response = client.chat.completions.create(
+        model="deepseek-chat",
+        messages=messages,
+        max_tokens=4096,
+        temperature = temp, # Dynamic temperature parameter
+        stream=False,
     )
 
-    outputs = ""
-    for chunk in stream:
-        outputs += chunk.choices[0].delta.content
-    
-    formatted_response = f"Here is the perference: {preferences} Here is the Prompt: {prompt}\nHere are some fun activities you might enjoy (Request ID: {request_id}):\n\n" + outputs
+    logger.info(f"Raw response: {response}")
+
+    outputs = response.choices[0].message.content
+
+    formatted_response = outputs
 
     logger.info(f"Request ID: {request_id}")
     logger.info(f"User Input: {user_input}")
